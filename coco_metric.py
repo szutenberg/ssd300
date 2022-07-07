@@ -12,65 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""COCO-style evaluation metrics.
-
-Implements the interface of COCO API and metric_fn in tf.TPUEstimator.
-
-COCO API: github.com/cocodataset/cocoapi/
-"""
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import atexit
-import tempfile
 import time
-
-from absl import flags
-
 import numpy as np
-import coco
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
 import six
 
-COCO = coco.COCO
-COCOeval = coco.COCOeval
-
-import tensorflow as tf
-
 import ssd_constants
-
-FLAGS = flags.FLAGS
 
 
 # https://github.com/cocodataset/cocoapi/issues/49
 if six.PY3:
-  import pycocotools.coco
-  pycocotools.coco.unicode = str
+  COCO.unicode = str
 
-
-def create_coco(val_json_file, use_cpp_extension=True):
-  """Creates Microsoft COCO helper class object and return it."""
-  if val_json_file.startswith('gs://'):
-    _, local_val_json = tempfile.mkstemp(suffix='.json')
-    tf.gfile.Remove(local_val_json)
-
-    tf.gfile.Copy(val_json_file, local_val_json)
-    atexit.register(tf.gfile.Remove, local_val_json)
-  else:
-    local_val_json = val_json_file
-
-  if use_cpp_extension:
-    coco_gt = coco.COCO(local_val_json, False)
-  else:
-    coco_gt = COCO(local_val_json)
-  return coco_gt
 
 
 def compute_map(labels_and_predictions,
                 coco_gt,
-                use_cpp_extension=True,
-                nms_on_tpu=True):
+                use_cpp_extension=True):
   """Use model predictions to compute mAP.
 
   The evaluation code is largely copied from the MLPerf reference
@@ -82,49 +41,34 @@ def compute_map(labels_and_predictions,
     labels_and_predictions: A map from TPU predict method.
     coco_gt: ground truch COCO object.
     use_cpp_extension: use cocoeval C++ library.
-    nms_on_tpu: do NMS on TPU.
   Returns:
     Evaluation result.
   """
 
   predictions = []
   tic = time.time()
+  num_samples = labels_and_predictions[0].shape[0]
 
-  if nms_on_tpu:
-    p = []
-    for i in labels_and_predictions:
-      for j in i:
-        p.append(np.array(j, dtype=np.float32))
-    predictions = np.concatenate(list(p)).reshape((-1, 7))
-  else:
-    for example in labels_and_predictions:
-      if ssd_constants.IS_PADDED in example and example[
-          ssd_constants.IS_PADDED]:
-        continue
+  for i in range(num_samples):
+    pred_box = labels_and_predictions[0][i]
+    pred_scores = labels_and_predictions[1][i]
+    indices = labels_and_predictions[2][i]
+    htot, wtot, _ = labels_and_predictions[3][i]
+    loc, label, prob = decode_single(
+        pred_box, pred_scores, indices, ssd_constants.OVERLAP_CRITERIA,
+        ssd_constants.MAX_NUM_EVAL_BOXES, ssd_constants.MAX_NUM_EVAL_BOXES)
 
-      htot, wtot, _ = example[ssd_constants.RAW_SHAPE]
-      pred_box = example['pred_box']
-      pred_scores = example['pred_scores']
-      indices = example['indices']
-      loc, label, prob = decode_single(
-          pred_box, pred_scores, indices, ssd_constants.OVERLAP_CRITERIA,
-          ssd_constants.MAX_NUM_EVAL_BOXES, ssd_constants.MAX_NUM_EVAL_BOXES)
-
-      for loc_, label_, prob_ in zip(loc, label, prob):
-        # Ordering convention differs, hence [1], [0] rather than [0], [1]
-        predictions.append([
-            int(example[ssd_constants.SOURCE_ID]),
-            loc_[1] * wtot, loc_[0] * htot, (loc_[3] - loc_[1]) * wtot,
-            (loc_[2] - loc_[0]) * htot, prob_,
-            ssd_constants.CLASS_INV_MAP[label_]
-        ])
+    for loc_, label_, prob_ in zip(loc, label, prob):
+      # Ordering convention differs, hence [1], [0] rather than [0], [1]
+      predictions.append([
+          int(labels_and_predictions[4][i]),
+          loc_[1] * wtot, loc_[0] * htot, (loc_[3] - loc_[1]) * wtot,
+          (loc_[2] - loc_[0]) * htot, prob_,
+          ssd_constants.CLASS_INV_MAP[label_]
+      ])
 
   toc = time.time()
-  tf.logging.info('Prepare predictions DONE (t={:0.2f}s).'.format(toc - tic))
-
-  if coco_gt is None:
-    coco_gt = create_coco(
-        FLAGS.val_json_file, use_cpp_extension=use_cpp_extension)
+  print('Prepare predictions DONE (t={:0.2f}s).'.format(toc - tic))
 
   if use_cpp_extension:
     coco_dt = coco_gt.LoadRes(np.array(predictions, dtype=np.float32))
@@ -147,7 +91,7 @@ def compute_map(labels_and_predictions,
   metric_names = ['AP', 'AP50', 'AP75', 'APs', 'APm', 'APl', 'ARmax1',
                   'ARmax10', 'ARmax100', 'ARs', 'ARm', 'ARl']
   coco_time = time.time()
-  tf.logging.info('COCO eval DONE (t={:0.2f}s).'.format(coco_time - toc))
+  print('COCO eval DONE (t={:0.2f}s).'.format(coco_time - toc))
 
   # Prefix with "COCO" to group in TensorBoard.
   return {'COCO/' + key: value for key, value in zip(metric_names, stats)}
@@ -239,7 +183,7 @@ def decode_single(bboxes_in,
     labels_out.extend([i]*len(candidates))
 
   if len(scores_out) == 0:
-    tf.logging.info("No objects detected. Returning dummy values.")
+    print("No objects detected. Returning dummy values.")
     return (
         np.zeros(shape=(1, 4), dtype=np.float32),
         np.zeros(shape=(1,), dtype=np.int32),

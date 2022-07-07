@@ -19,7 +19,7 @@ protos for object detection.
 """
 import tensorflow as tf
 
-from official.vision.dataloaders import decoder
+from utils import decoder
 
 
 def _generate_source_id(image_bytes):

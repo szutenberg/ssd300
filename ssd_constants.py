@@ -14,19 +14,11 @@
 # ==============================================================================
 """Central location for all constants related to MLPerf SSD."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 # ==============================================================================
 # == Model =====================================================================
 # ==============================================================================
 IMAGE_SIZE = 300
-SPACE_TO_DEPTH_BLOCK_SIZE = 2
 
-# TODO(taylorrobie): MLPerf uses 80, but COCO documents 90. (RetinaNet uses 90)
-# Update(taylorrobie): Labels > 81 show up in the pipeline. This will need to
-#                      be resolved.
 NUM_CLASSES = 81  # Including "no class". Not all COCO classes are used.
 
 # Note: Zero is special. (Background class) CLASS_INV_MAP[0] must be zero.
@@ -40,12 +32,6 @@ _MAP = {j: i for i, j in enumerate(CLASS_INV_MAP)}
 CLASS_MAP = tuple(_MAP.get(i, -1) for i in range(max(CLASS_INV_MAP) + 1))
 
 NUM_SSD_BOXES = 8732
-
-RESNET_DEPTH = 34
-
-"""SSD specific"""
-MIN_LEVEL = 3
-MAX_LEVEL = 8
 
 FEATURE_SIZES = (38, 19, 10, 5, 3, 1)
 STEPS = (8, 16, 32, 64, 100, 300)
@@ -69,53 +55,19 @@ NUM_CROP_PASSES = 50
 CROP_MIN_IOU_CHOICES = (0, 0.1, 0.3, 0.5, 0.7, 0.9)
 P_NO_CROP_PER_PASS = 1 / (len(CROP_MIN_IOU_CHOICES) + 1)
 
-# Hard example mining
-NEGS_PER_POSITIVE = 3
-
 # Batch normalization
 BATCH_NORM_DECAY = 0.9
 BATCH_NORM_EPSILON = 1e-5
 
-
-# ==============================================================================
-# == Optimizer =================================================================
-# ==============================================================================
-BASE_LEARNING_RATE = 1e-3
-FIRST_LR_DROP_STEP = 160000
-SECOND_LR_DROP_STEP = 200000
+# Optimizer
 MOMENTUM = 0.9
-WEIGHT_DECAY = 5e-4
-DEFAULT_BATCH_SIZE = 32.0
-
-# ==============================================================================
-# == Keys ======================================================================
-# ==============================================================================
-BOXES = "boxes"
-CLASSES = "classes"
-NUM_MATCHED_BOXES = "num_matched_boxes"
-IMAGE = "image"
-SOURCE_ID = "source_id"
-RAW_SHAPE = "raw_shape"
-IS_PADDED = "is_padded"
 
 
 # ==============================================================================
 # == Evaluation ================================================================
 # ==============================================================================
 
-# Note: This is based on a batch size of 32
-# https://github.com/mlperf/reference/blob/master/single_stage_detector/ssd/train.py#L21-L37  # pylint: disable=line-too-long
-EVAL_SAMPLES = 5000
-CHECKPOINT_FREQUENCY = 200
 MAX_NUM_EVAL_BOXES = 200
 OVERLAP_CRITERIA = 0.5  # Used for nonmax supression
 MIN_SCORE = 0.05  # Minimum score to be considered during evaluation.
 DUMMY_SCORE = -1e5  # If no boxes are matched.
-# Eval step intervals starting from 0
-EVAL_STEPS = (120000, 40000, 20000, 20000, 20000, 20000, 20000, 20000, 20000)
-# Target COCO/AP for mlperf.
-EVAL_TARGET = 0.23
-
-# For multiprocessing.
-QUEUE_SIZE = 24
-WORKER_COUNT = 10

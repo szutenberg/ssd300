@@ -41,7 +41,7 @@ back to rank 4.
 
 import numpy as np
 import tensorflow as tf
-from official.vision.utils.object_detection import box_list
+from utils.object_detection import box_list
 
 
 def _flip_boxes_left_right(boxes):

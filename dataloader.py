@@ -14,25 +14,20 @@
 # ==============================================================================
 """Data loader and processing."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+import glob
 import itertools as it
 import math
-
 import numpy as np
 import tensorflow as tf
 
-from object_detection import argmax_matcher
-from object_detection import box_list
-from object_detection import faster_rcnn_box_coder
-from object_detection import preprocessor
-from object_detection import region_similarity_calculator
-from object_detection import target_assigner
-from object_detection import tf_example_decoder
-from mlp_log import mlp_log
 import ssd_constants
+from utils.object_detection import argmax_matcher
+from utils.object_detection import box_list
+from utils.object_detection import faster_rcnn_box_coder
+from utils.object_detection import preprocessor
+from utils.object_detection import target_assigner
+from utils import iou_similarity
+from utils import tf_example_decoder
 
 
 class DefaultBoxes(object):
@@ -62,14 +57,13 @@ class DefaultBoxes(object):
 
       assert len(all_sizes) == ssd_constants.NUM_DEFAULTS[idx]
 
-      for w, h in all_sizes:
-        for i, j in it.product(range(feature_size), repeat=2):
+      for i, j in it.product(range(feature_size), repeat=2):
+        for w, h in all_sizes:
           cx, cy = (j + 0.5) / fk[idx], (i + 0.5) / fk[idx]
           box = tuple(np.clip(k, 0, 1) for k in (cy, cx, h, w))
           self.default_boxes.append(box)
 
     assert len(self.default_boxes) == ssd_constants.NUM_SSD_BOXES
-    mlp_log.mlperf_print('max_samples', ssd_constants.NUM_SSD_BOXES)
 
     def to_ltrb(cy, cx, h, w):
       return cy - h / 2, cx - w / 2, cy + h / 2, cx + w / 2
@@ -82,49 +76,15 @@ class DefaultBoxes(object):
     if order == 'xywh': return self.default_boxes
 
 
-def calc_iou_tensor(box1, box2):
-  """ Calculation of IoU based on two boxes tensor,
-      Reference to https://github.com/kuangliu/pytorch-ssd
-      input:
-          box1 (N, 4)
-          box2 (M, 4)
-      output:
-          IoU (N, M)
-  """
-  N = tf.shape(box1)[0]
-  M = tf.shape(box2)[0]
-
-  be1 = tf.tile(tf.expand_dims(box1, axis=1), (1, M, 1))
-  be2 = tf.tile(tf.expand_dims(box2, axis=0), (N, 1, 1))
-
-  # Left Top & Right Bottom
-  lt = tf.maximum(be1[:,:,:2], be2[:,:,:2])
-
-  rb = tf.minimum(be1[:,:,2:], be2[:,:,2:])
-
-  delta = tf.maximum(rb - lt, 0)
-
-  intersect = delta[:,:,0]*delta[:,:,1]
-
-  delta1 = be1[:,:,2:] - be1[:,:,:2]
-  area1 = delta1[:,:,0]*delta1[:,:,1]
-  delta2 = be2[:,:,2:] - be2[:,:,:2]
-  area2 = delta2[:,:,0]*delta2[:,:,1]
-
-  iou = intersect/(area1 + area2 - intersect)
-  return iou
-
-
 def ssd_crop(image, boxes, classes):
   """IoU biassed random crop.
-
   Reference: https://github.com/chauhan-utk/ssd.DomainAdaptation
   """
 
   num_boxes = tf.shape(boxes)[0]
 
   def no_crop_check():
-    return (tf.random_uniform(shape=(), minval=0, maxval=1, dtype=tf.float32)
+    return (tf.random.uniform(shape=(), minval=0, maxval=1, dtype=tf.float32)
             < ssd_constants.P_NO_CROP_PER_PASS)
 
   def no_crop_proposal():
@@ -135,7 +95,7 @@ def ssd_crop(image, boxes, classes):
     )
 
   def crop_proposal():
-    rand_vec = lambda minval, maxval: tf.random_uniform(
+    rand_vec = lambda minval, maxval: tf.random.uniform(
         shape=(ssd_constants.NUM_CROP_PASSES, 1), minval=minval, maxval=maxval,
         dtype=tf.float32)
 
@@ -147,8 +107,8 @@ def ssd_crop(image, boxes, classes):
 
     ltrb = tf.concat([left, top, right, bottom], axis=1)
 
-    min_iou = tf.random_shuffle(ssd_constants.CROP_MIN_IOU_CHOICES)[0]
-    ious = calc_iou_tensor(ltrb, boxes)
+    min_iou = tf.random.shuffle(ssd_constants.CROP_MIN_IOU_CHOICES)[0]
+    ious = iou_similarity.intersection(ltrb, boxes)
 
     # discard any bboxes whose center not in the cropped image
     xc, yc = [tf.tile(0.5 * (boxes[:, i + 0] + boxes[:, i + 2])[tf.newaxis, :],
@@ -222,7 +182,7 @@ def ssd_crop(image, boxes, classes):
   cropped_image = tf.image.crop_and_resize(
       image=image[tf.newaxis, :, :, :],
       boxes=crop_bounds[tf.newaxis, :],
-      box_ind=tf.zeros((1,), tf.int32),
+      box_indices=tf.zeros((1,), tf.int32),
       crop_size=(ssd_constants.IMAGE_SIZE, ssd_constants.IMAGE_SIZE),
   )[0, :, :, :]
 
@@ -240,7 +200,6 @@ def color_jitter(image, brightness=0, contrast=0, saturation=0, hue=0):
     contrast: A float, specifying the contrast for color jitter.
     saturation: A float, specifying the saturation for color jitter.
     hue: A float, specifying the hue for color jitter.
-
   Returns:
     The distorted image tensor.
   """
@@ -271,7 +230,7 @@ def encode_labels(gt_boxes, gt_labels):
     encoded_boxes: a tensor with shape [num_anchors, 4].
     num_positives: scalar tensor storing number of positives in an image.
   """
-  similarity_calc = region_similarity_calculator.IouSimilarity()
+  similarity_calc = similarity_calc = iou_similarity.IouSimilarity()
   matcher = argmax_matcher.ArgMaxMatcher(
       matched_threshold=ssd_constants.MATCH_THRESHOLD,
       unmatched_threshold=ssd_constants.MATCH_THRESHOLD,
@@ -291,58 +250,8 @@ def encode_labels(gt_boxes, gt_labels):
       default_boxes, target_boxes, gt_labels)
   num_matched_boxes = tf.reduce_sum(
       tf.cast(tf.not_equal(matches.match_results, -1), tf.float32))
+
   return encoded_classes, encoded_boxes, num_matched_boxes
-
-
-def fused_transpose_and_space_to_depth(
-    images,
-    block_size=ssd_constants.SPACE_TO_DEPTH_BLOCK_SIZE,
-    transpose_input=True):
-  """Fuses space-to-depth and transpose.
-
-  Space-to-depth performas the following permutation, which is equivalent to
-  tf.nn.space_to_depth.
-
-  images = tf.reshape(images, [batch, h // block_size, block_size,
-                               w // block_size, block_size, c])
-  images = tf.transpose(images, [0, 1, 3, 2, 4, 5])
-  images = tf.reshape(images, [batch, h // block_size, w // block_size,
-                               c * (block_size ** 2)])
-
-  Args:
-    images: A tensor with a shape of [batch_size, h, w, c] as the images. The h
-      and w can be dynamic sizes.
-    block_size: A integer for space-to-depth block size.
-    transpose_input: A boolean to indicate if the images tensor should be
-      transposed.
-
-  Returns:
-    A transformed images tensor.
-
-  """
-  batch_size, h, w, c = images.get_shape().as_list()
-  images = tf.reshape(
-      images,
-      [batch_size, h // block_size, block_size, w // block_size, block_size, c])
-  if transpose_input:
-    if batch_size > 8:
-      # HWCN
-      images = tf.transpose(images, [1, 3, 2, 4, 5, 0])
-      images = tf.reshape(
-          images,
-          [h // block_size, w // block_size, c * (block_size**2), batch_size])
-    else:
-      # HWNC
-      images = tf.transpose(images, [1, 3, 0, 2, 4, 5])
-      images = tf.reshape(
-          images,
-          [h // block_size, w // block_size, batch_size, c * (block_size**2)])
-  else:
-    images = tf.transpose(images, [0, 1, 3, 2, 4, 5])
-    images = tf.reshape(
-        images,
-        [batch_size, h // block_size, w // block_size, c * (block_size**2)])
-  return images
 
 
 class SSDInputReader(object):
@@ -350,20 +259,22 @@ class SSDInputReader(object):
 
   def __init__(self,
                file_pattern,
-               transpose_input=False,
                is_training=False,
-               use_fake_data=False,
-               distributed_eval=False,
                count=-1):
     self._file_pattern = file_pattern
-    self._transpose_input = transpose_input
     self._is_training = is_training
-    self._use_fake_data = use_fake_data
-    self._distributed_eval = distributed_eval
     self._count = count
 
   def __call__(self, params):
     example_decoder = tf_example_decoder.TfExampleDecoder()
+
+    def normalize(img):
+      img -= tf.constant(
+          ssd_constants.NORMALIZATION_MEAN, shape=[1, 1, 3], dtype=img.dtype)
+      COEF_STD = 1.0 / tf.constant(
+          ssd_constants.NORMALIZATION_STD, shape=[1, 1, 3], dtype=img.dtype)
+      img *= COEF_STD
+      return img
 
     def _parse_example(data):
       with tf.name_scope('augmentation'):
@@ -380,56 +291,28 @@ class SSDInputReader(object):
 
         if self._is_training:
           image, boxes, classes = ssd_crop(image, boxes, classes)
-          # ssd_crop resizes and returns image of dtype float32 and does not
-          # change its range (i.e., value in between 0--255). Divide by 255.
-          # converts it to [0, 1] range. Not doing this before cropping to
-          # avoid dtype cast (which incurs additional memory copy).
           image /= 255.0
-
-          # random_horizontal_flip() is hard coded to flip with 50% chance.
           image, boxes = preprocessor.random_horizontal_flip(
               image=image, boxes=boxes)
-
-          # TODO(shibow): Investigate the parameters for color jitter.
           image = color_jitter(
               image, brightness=0.125, contrast=0.5, saturation=0.5, hue=0.05)
-
-          if params['use_bfloat16']:
-            image = tf.cast(image, dtype=tf.bfloat16)
+          image = normalize(image)
+          image = tf.cast(image, dtype=params['dtype'])
 
           encoded_classes, encoded_boxes, num_matched_boxes = encode_labels(
               boxes, classes)
 
-          # TODO(taylorrobie): Check that this cast is valid.
-          encoded_classes = tf.cast(encoded_classes, tf.int32)
+          encoded_boxes = tf.reshape(encoded_boxes, [-1])
+          encoded_classes = tf.reshape(encoded_classes, [-1])
+          num_matched_boxes = tf.reshape(num_matched_boxes, [-1])
 
-          labels = {
-              ssd_constants.NUM_MATCHED_BOXES: num_matched_boxes,
-              ssd_constants.BOXES: encoded_boxes,
-              ssd_constants.CLASSES: tf.squeeze(encoded_classes, axis=1),
-          }
-          # This is for dataloader visualization; actual model doesn't use this.
-          if params['visualize_dataloader']:
-            box_coder = faster_rcnn_box_coder.FasterRcnnBoxCoder(
-                scale_factors=ssd_constants.BOX_CODER_SCALES)
-            decoded_boxes = tf.expand_dims(box_coder.decode(
-                rel_codes=tf.squeeze(encoded_boxes),
-                anchors=box_list.BoxList(
-                    tf.convert_to_tensor(DefaultBoxes()('ltrb')))
-            ).get(), axis=0)
-            labels['decoded_boxes'] = tf.squeeze(decoded_boxes)
-
-          return image, labels
+          return image, tf.concat([encoded_boxes, encoded_classes, num_matched_boxes], axis=-1)
 
         else:
-          image = tf.image.resize_images(
-              image, size=(ssd_constants.IMAGE_SIZE, ssd_constants.IMAGE_SIZE))
-          # resize_image returns image of dtype float32 and does not change its
-          # range. Divide by 255 to convert image to [0, 1] range.
+          image = tf.image.resize(image, size=(ssd_constants.IMAGE_SIZE, ssd_constants.IMAGE_SIZE))
           image /= 255.
-
-          if params['use_bfloat16']:
-            image = tf.cast(image, dtype=tf.bfloat16)
+          image = normalize(image)
+          image = tf.cast(image, dtype=params['dtype'])
 
           def trim_and_pad(inp_tensor, dim_1):
             """Limit the number of boxes, and pad if necessary."""
@@ -442,133 +325,34 @@ class SSDInputReader(object):
           boxes, classes = trim_and_pad(boxes, 4), trim_and_pad(classes, 1)
 
           sample = {
-              ssd_constants.IMAGE: image,
-              ssd_constants.BOXES: boxes,
-              ssd_constants.CLASSES: classes,
-              ssd_constants.SOURCE_ID: tf.string_to_number(source_id, tf.int32),
-              ssd_constants.RAW_SHAPE: raw_shape,
+              "image": image,
+              "boxes": boxes,
+              "classes": classes,
+              "source_id": tf.strings.to_number(source_id, tf.int32),
+              "raw_shape": raw_shape,
           }
 
-          if not self._is_training and self._count > params['eval_samples']:
-            sample[ssd_constants.IS_PADDED] = data[ssd_constants.IS_PADDED]
           return sample
 
-    batch_size = params['batch_size']
-    dataset = tf.data.Dataset.list_files(self._file_pattern, shuffle=False)
+    filenames = glob.glob(self._file_pattern)
+    filenames.sort()
+    filenames = filenames[params['shard_index']::params['num_shards']]
 
-    if self._is_training or self._distributed_eval:
-      if 'context' in params:
-        dataset = dataset.shard(
-            params['context'].num_hosts,
-            params['context'].current_input_fn_deployment()[1])
-        if self._is_training:
-          dataset = dataset.shuffle(
-              tf.to_int64(256 / params['context'].num_hosts))
-      else:
-        dataset = dataset.shard(params['dataset_num_shards'],
-                                params['dataset_index'])
-        if self._is_training:
-          dataset = dataset.shuffle(
-              tf.to_int64(256 / params['dataset_num_shards']))
-
-    # Prefetch data from files.
-    def _prefetch_dataset(filename):
-      dataset = tf.data.TFRecordDataset(filename).prefetch(1)
-      return dataset
-    dataset = dataset.apply(
-        tf.data.experimental.parallel_interleave(
-            _prefetch_dataset, cycle_length=32, sloppy=self._is_training))
-
-    # Parse the fetched records to input tensors for model function.
-    dataset = dataset.map(example_decoder.decode, num_parallel_calls=64)
-
-    def _mark_is_padded(data):
-      sample = data
-      sample[ssd_constants.IS_PADDED] = tf.constant(True, dtype=tf.bool)
-      return sample
-
-    def _mark_is_not_padded(data):
-      sample = data
-      sample[ssd_constants.IS_PADDED] = tf.constant(False, dtype=tf.bool)
-      return sample
-
-    # Pad dataset to the desired size and mark if the data is padded.
-    # During eval/predict, if local_batch_size * num_shards > 5000,
-    # original dataset size won't be fit for computations on that number
-    # of shards. In this case, will take
-    # (local_batch_size - 5000 / num_shards) data from the original dataset
-    # on each shard and mark the padded data as `is_padded`.
-    # Also mark the original data as `not_padded`.
-    # Append the padded data to the original dataset.
-    if not self._is_training and self._count > params['eval_samples']:
-      padded_dataset = dataset.map(_mark_is_padded)
-      dataset = dataset.map(_mark_is_not_padded)
-      dataset = dataset.concatenate(padded_dataset).take(
-          self._count // params['dataset_num_shards'])
+    dataset = tf.data.TFRecordDataset(filenames)
+    dataset = dataset.map(example_decoder.decode, num_parallel_calls=64, deterministic=False)
 
     if self._is_training:
-      dataset = dataset.map(
-          # pylint: disable=g-long-lambda
-          lambda data: (data,
-                        tf.greater(tf.shape(data['groundtruth_boxes'])[0], 0)),
-          num_parallel_calls=64)
-      dataset = dataset.filter(lambda data, pred: pred)
-      # Prefetching and caching increases the memory usage, so disable when
-      # using fake data.
-      if not self._use_fake_data:
-        dataset = dataset.cache().shuffle(64).repeat()
-      dataset = dataset.map(
-          lambda data, _: _parse_example(data), num_parallel_calls=64)
-      dataset = dataset.batch(batch_size=batch_size, drop_remainder=True)
+      dataset = dataset.shuffle(64 * params['batch_size'], reshuffle_each_iteration=True).repeat()
+
+    dataset = dataset.map(_parse_example, num_parallel_calls=64, deterministic=False)
+    dataset = dataset.batch(batch_size=params['batch_size'], drop_remainder=True)
+
+    if len(tf.config.list_logical_devices('HPU')) > 0:
+      dataset = dataset.prefetch(1)
+      device = "/device:HPU:0"
+      with tf.device(device):
+        dataset = dataset.apply(tf.data.experimental.prefetch_to_device(device))
     else:
-      dataset = dataset.prefetch(batch_size * 64)
-      dataset = dataset.map(_parse_example, num_parallel_calls=64)
-      dataset = dataset.batch(batch_size=batch_size, drop_remainder=True)
-
-    if params['conv0_space_to_depth']:
-      def _space_to_depth_training_fn(images, labels):
-        images = fused_transpose_and_space_to_depth(
-            images,
-            block_size=ssd_constants.SPACE_TO_DEPTH_BLOCK_SIZE,
-            transpose_input=self._transpose_input)
-        if self._transpose_input and batch_size > 8:
-          labels[ssd_constants.BOXES] = tf.transpose(
-              labels[ssd_constants.BOXES], [1, 2, 0])
-        return images, labels
-
-      def _space_to_depth_eval_fn(labels):
-        images = labels[ssd_constants.IMAGE]
-        labels[ssd_constants.IMAGE] = fused_transpose_and_space_to_depth(
-            images,
-            block_size=ssd_constants.SPACE_TO_DEPTH_BLOCK_SIZE,
-            transpose_input=False)
-        return labels
-
-      if self._is_training:
-        space_to_depth_fn = _space_to_depth_training_fn
-      else:
-        space_to_depth_fn = _space_to_depth_eval_fn
-      dataset = dataset.map(space_to_depth_fn, num_parallel_calls=64)
-    elif self._transpose_input and self._is_training:
-      # Manually apply the double transpose trick for training data.
-      def _transpose_dataset(image, labels):
-        if batch_size > 8:
-          image = tf.transpose(image, [1, 2, 3, 0])
-          labels[ssd_constants.BOXES] = tf.transpose(
-              labels[ssd_constants.BOXES], [1, 2, 0])
-        else:
-          image = tf.transpose(image, [1, 2, 0, 3])
-        return image, labels
-
-      dataset = dataset.map(_transpose_dataset, num_parallel_calls=64)
-
-    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    options = tf.data.Options()
-    options.experimental_threading.max_intra_op_parallelism = 1
-    options.experimental_threading.private_threadpool_size = 48
-    dataset = dataset.with_options(options)
-
-    if self._use_fake_data:
-      dataset = dataset.take(1).cache().repeat()
+      dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
     return dataset
